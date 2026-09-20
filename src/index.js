@@ -34,9 +34,66 @@ const getMpesaAccessToken = async () => {
   }
 };
 
-// Root Health-Check Route
+// Root Web Page with Input Form
 app.get('/', (req, res) => {
-  res.status(200).send('Bidmoh Airtime Reseller API is running successfully! 🚀');
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>Bidmoh Airtime Reseller</title>
+      <style>
+        body { font-family: Arial, sans-serif; background: #f4f4f9; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+        .card { background: white; padding: 30px; border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); width: 100%; max-width: 400px; }
+        h2 { color: #333; text-align: center; margin-bottom: 20px; }
+        label { display: block; margin-top: 15px; font-weight: bold; color: #555; }
+        input { width: 100%; padding: 10px; margin-top: 5px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
+        button { width: 100%; background: #28a745; color: white; border: none; padding: 12px; margin-top: 20px; border-radius: 4px; font-size: 16px; cursor: pointer; }
+        button:hover { background: #218838; }
+        #status { margin-top: 15px; text-align: center; font-weight: bold; font-size: 14px; }
+      </style>
+    </head>
+    <body>
+      <div class="card">
+        <h2>Airtime Reseller</h2>
+        <label>Phone Number (e.g. 2547XXXXXXXX)</label>
+        <input type="text" id="phone" value="2547" />
+        <label>Amount (KES)</label>
+        <input type="number" id="amount" value="10" />
+        <button onclick="triggerStkPush()">Buy Airtime</button>
+        <div id="status"></div>
+      </div>
+      <script>
+        async function triggerStkPush() {
+          const phoneNumber = document.getElementById('phone').value;
+          const amount = document.getElementById('amount').value;
+          const statusDiv = document.getElementById('status');
+          
+          statusDiv.style.color = '#007bff';
+          statusDiv.innerText = 'Sending STK Push... Check your phone!';
+
+          try {
+            const res = await fetch('/api/stk-push', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ phoneNumber, amount })
+            });
+            const data = await res.json();
+            if (data.success) {
+              statusDiv.style.color = '#28a745';
+              statusDiv.innerText = 'STK Push sent successfully! Enter your PIN on your phone.';
+            } else {
+              statusDiv.style.color = '#dc3545';
+              statusDiv.innerText = 'Error: ' + JSON.stringify(data.error);
+            }
+          } catch (err) {
+            statusDiv.style.color = '#dc3545';
+            statusDiv.innerText = 'Network error occurred.';
+          }
+        }
+      </script>
+    </body>
+    </html>
+  `);
 });
 
 // 1. Endpoint to Initiate M-Pesa STK Push
@@ -56,7 +113,7 @@ app.post('/api/stk-push', async (req, res) => {
       Timestamp: timestamp,
       TransactionType: 'CustomerPayBillOnline',
       Amount: amount || 1,
-      PartyA: phoneNumber, // Format: 2547XXXXXXXX
+      PartyA: phoneNumber,
       PartyB: shortCode,
       PhoneNumber: phoneNumber,
       CallBackURL: 'https://bidmoh-app.onrender.com/api/mpesa-callback',
@@ -93,7 +150,6 @@ app.post('/api/mpesa-callback', async (req, res) => {
   if (resultCode === 0) {
     console.log('Payment successful! Dispatching airtime via Africa\'s Talking...');
     
-    // Extract phone number and amount from callback metadata
     const callbackItems = stkCallback.CallbackMetadata?.Item || [];
     const phoneItem = callbackItems.find(item => item.Name === 'PhoneNumber');
     const amountItem = callbackItems.find(item => item.Name === 'Amount');
