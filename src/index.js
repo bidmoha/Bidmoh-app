@@ -1,4 +1,5 @@
 import express from 'express';
+import axios from 'axios';
 
 const app = express();
 const PORT = process.env.PORT || 10000;
@@ -6,7 +7,7 @@ const PORT = process.env.PORT || 10000;
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Frontend HTML page
+// Frontend UI
 app.get('/', (req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -27,7 +28,7 @@ app.get('/', (req, res) => {
     </head>
     <body>
       <div class="card">
-        <h2>Buy Airtime</h2>
+        <h2>Buy Airtime via M-Pesa</h2>
         <form action="/api/buy-airtime" method="POST">
           <label for="phone">Phone Number (e.g. 254712345678):</label>
           <input type="text" id="phone" name="phone" placeholder="2547..." required>
@@ -43,13 +44,71 @@ app.get('/', (req, res) => {
   `);
 });
 
-// Endpoint to process airtime requests
-app.post('/api/buy-airtime', (req, res) => {
-  const { phone, amount } = req.body;
-  console.log(`Received airtime request for ${phone} - Amount: KES ${amount}`);
+// Handle Airtime & M-Pesa STK Push
+app.post('/api/buy-airtime', async (req, res) => {
+  let { phone, amount } = req.body;
   
-  // M-Pesa STK push / Africa's Talking API calls will go here next
-  res.send(`<h3>STK Push Sent!</h3><p>Check phone ${phone} to complete payment of KES ${amount}.</p><a href="/">Go Back</a>`);
+  // Format phone number to start with 254 if user typed 07...
+  if (phone.startsWith('0')) {
+    phone = '254' + phone.slice(1);
+  }
+
+  try {
+    // 1. Get Daraja Access Token
+    const consumerKey = process.env.MPESA_CONSUMER_KEY;
+    const consumerSecret = process.env.MPESA_CONSUMER_SECRET;
+    const auth = Buffer.from(`${consumerKey}:${consumerSecret}`).toString('base64');
+
+    const tokenResponse = await axios.get(
+      'https://sandbox.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials',
+      { headers: { Authorization: `Basic ${auth}` } }
+    );
+    const accessToken = tokenResponse.data.access_token;
+
+    // 2. Prepare STK Push Parameters
+    const shortCode = process.env.MPESA_SHORTCODE;
+    const passkey = process.env.MPESA_PASSKEY;
+    const timestamp = new Date().toISOString().replace(/[^0-9]/g, '').slice(0, 14);
+    const password = Buffer.from(`${shortCode}${passkey}${timestamp}`).toString('base64');
+
+    const stkResponse = await axios.post(
+      'https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/processrequest',
+      {
+        BusinessShortCode: shortCode,
+        Password: password,
+        Timestamp: timestamp,
+        TransactionType: 'CustomerPayBillOnline',
+        Amount: amount,
+        PartyA: phone,
+        PartyB: shortCode,
+        PhoneNumber: phone,
+        CallBackURL: 'https://bidmoh-app.onrender.com/api/mpesa-callback',
+        AccountReference: 'BidmohAirtime',
+        TransactionDesc: 'Airtime Purchase'
+      },
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+
+    res.send(`
+      <h3>STK Push Sent!</h3>
+      <p>Please check phone <b>${phone}</b> for M-Pesa prompt of KES ${amount}.</p>
+      <a href="/">Make Another Purchase</a>
+    `);
+  } catch (error) {
+    console.error('M-Pesa Error:', error.response?.data || error.message);
+    res.status(500).send(`
+      <h3>Payment Request Failed</h3>
+      <p>Could not initiate M-Pesa STK push. Check your server logs and API keys.</p>
+      <a href="/">Try Again</a>
+    `);
+  }
+});
+
+// M-Pesa Callback Endpoint (Safaricom pings this when payment succeeds/fails)
+app.post('/api/mpesa-callback', (req, res) => {
+  console.log('M-Pesa Callback received:', JSON.stringify(req.body, null, 2));
+  // Here is where we will trigger Africa's Talking API to deliver the airtime once payment is confirmed!
+  res.status(200).json({ ResultCode: 0, ResultDesc: 'Accepted' });
 });
 
 app.listen(PORT, '0.0.0.0', () => {
