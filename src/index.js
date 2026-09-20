@@ -162,10 +162,10 @@ app.post('/api/mpesa-callback', async (req, res) => {
         recipients: [
           {
             phoneNumber: phoneNumber,
-            amount: `${amount}`
+            amount: `${amount}`,
+            currencyCode: 'KES'
           }
-        ],
-        currencyCode: 'KES'
+        ]
       });
       console.log('Africa\'s Talking Airtime Response:', JSON.stringify(airtimeResponse));
     } catch (error) {
