@@ -1,0 +1,107 @@
+import express from 'express';
+import axios from 'axios';
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// Serve static frontend files if you have a public folder
+app.use(express.static('public'));
+
+// Helper: Generate Safaricom Daraja Access Token
+async function getMpesaAccessToken() {
+    const consumerKey = process.env.MPESA_CONSUMER_KEY;
+    const consumerSecret = process.env.MPESA_CONSUMER_SECRET;
+    const auth = Buffer.from(`${consumerKey}:${consumerSecret}`).toString('base64');
+
+    try {
+        const response = await axios.get(
+            'https://sandbox.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials',
+            { headers: { Authorization: `Basic ${auth}` } }
+        );
+        return response.data.access_token;
+    } catch (error) {
+        console.error("Error generating access token:", error.response?.data || error.message);
+        throw error;
+    }
+}
+
+// M-Pesa STK Push Route
+app.post('/api/stk-push', async (req, res) => {
+    try {
+        const { phoneNumber, amount } = req.body;
+        const accessToken = await getMpesaAccessToken();
+
+        const timestamp = new Date().toISOString().replace(/[^0-9]/g, '').slice(0, 14);
+        const shortcode = process.env.MPESA_SHORTCODE;
+        const passkey = process.env.MPESA_PASSKEY;
+        const password = Buffer.from(`${shortcode}${passkey}${timestamp}`).toString('base64');
+
+        // Make sure to replace YOUR_RENDER_URL with your actual live Render app URL
+        const callbackUrl = 'https://bidmoh-app.onrender.com/api/callback';
+
+        const response = await axios.post(
+            'https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/processrequest',
+            {
+                BusinessShortCode: shortcode,
+                Password: password,
+                Timestamp: timestamp,
+                TransactionType: 'CustomerPayBillOnline',
+                Amount: amount,
+                PartyA: phoneNumber,
+                PartyB: shortcode,
+                PhoneNumber: phoneNumber,
+                CallBackURL: callbackUrl,
+                AccountReference: 'AirtimePurchase',
+                TransactionDesc: 'Airtime Payment'
+            },
+            { headers: { Authorization: `Bearer ${accessToken}` } }
+        );
+
+        console.log("STK Push initiated successfully:", response.data);
+        res.json({ success: true, data: response.data });
+    } catch (error) {
+        console.error("STK Push error:", error.response?.data || error.message);
+        res.status(500).json({ success: false, error: error.response?.data || error.message });
+    }
+});
+
+// M-Pesa Callback Endpoint (Webhook)
+app.post('/api/callback', (req, res) => {
+    try {
+        const callbackData = req.body.Body.stkCallback;
+        const resultCode = callbackData.ResultCode;
+        const resultDesc = callbackData.ResultDesc;
+
+        console.log("--- M-PESA CALLBACK RECEIVED ---");
+        console.log(`Result Code: ${resultCode}`);
+        console.log(`Result Desc: ${resultDesc}`);
+
+        if (resultCode === 0) {
+            const metadata = callbackData.CallbackMetadata.Item;
+            let mpesaReceiptNumber = "";
+            let phoneNumber = "";
+
+            metadata.forEach(item => {
+                if (item.Name === "MpesaReceiptNumber") mpesaReceiptNumber = item.Value;
+                if (item.Name === "PhoneNumber") phoneNumber = item.Value;
+            });
+
+            console.log(`SUCCESS: Payment received from ${phoneNumber}. Receipt: ${mpesaReceiptNumber}`);
+            // TODO: Trigger airtime delivery here next!
+        } else {
+            console.log(`FAILED/CANCELLED: ${resultDesc}`);
+        }
+
+        res.status(200).json({ ResultCode: 0, ResultDesc: "Success" });
+    } catch (error) {
+        console.error("Error processing callback:", error);
+        res.status(500).json({ ResultCode: 1, ResultDesc: "Internal Server Error" });
+    }
+});
+
+app.listen(PORT, () => {
+    console.log(`Server is running on port ${PORT}`);
+});
