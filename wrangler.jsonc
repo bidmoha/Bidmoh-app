@@ -1,0 +1,12 @@
+{
+  // Reconstructed local project for bidmoh.com, matching the live "bidmoh" Worker
+  // (Cloudflare Workers Static Assets). See README.md before touching "deploy".
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "bidmoh",
+  "compatibility_date": "2026-08-01",
+  "main": "src/index.js",
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS"
+  }
+}
