@@ -34,6 +34,11 @@ const getMpesaAccessToken = async () => {
   }
 };
 
+// Root Health-Check Route
+app.get('/', (req, res) => {
+  res.status(200).send('Bidmoh Airtime Reseller API is running successfully! 🚀');
+});
+
 // 1. Endpoint to Initiate M-Pesa STK Push
 app.post('/api/stk-push', async (req, res) => {
   try {
