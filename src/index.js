@@ -2,11 +2,31 @@ import express from 'express';
 import bodyParser from 'body-parser';
 import AfricasTalking from 'africastalking';
 import axios from 'axios';
+import mongoose from 'mongoose';
 
 const app = express();
 app.use(bodyParser.json());
 
-// Initialize Africa's Talking Sandbox Client
+// 1. Connect to MongoDB Atlas using the environment variable on Render
+const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/airtime-reseller';
+mongoose.connect(MONGO_URI)
+  .then(() => console.log('Connected to MongoDB successfully'))
+  .catch(err => console.error('MongoDB connection error:', err));
+
+// Define Transaction Schema for your Database
+const transactionSchema = new mongoose.Schema({
+  phoneNumber: String,
+  airtimeAmount: Number,
+  mpesaAmountCharged: Number,
+  markupProfit: Number,
+  mpesaReceiptNumber: { type: String, default: null },
+  status: { type: String, default: 'Pending' }, // Pending, Paid, Completed, Failed
+  createdAt: { type: Date, default: Date.now }
+});
+
+const Transaction = mongoose.model('Transaction', transactionSchema);
+
+// Initialize Africa's Talking Client
 const afs = AfricasTalking({
   apiKey: process.env.AT_API_KEY || 'your_at_api_key',
   username: process.env.AT_USERNAME || 'sandbox'
@@ -23,9 +43,7 @@ const getMpesaAccessToken = async () => {
   try {
     const response = await axios.get(
       'https://sandbox.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials',
-      {
-        headers: { Authorization: `Basic ${auth}` }
-      }
+      { headers: { Authorization: `Basic ${auth}` } }
     );
     return response.data.access_token;
   } catch (error) {
@@ -34,7 +52,7 @@ const getMpesaAccessToken = async () => {
   }
 };
 
-// Root Web Page with Input Form
+// Root Web Page with Input Form & Convenience Fee Notice
 app.get('/', (req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -47,6 +65,7 @@ app.get('/', (req, res) => {
         h2 { color: #333; text-align: center; margin-bottom: 20px; }
         label { display: block; margin-top: 15px; font-weight: bold; color: #555; }
         input { width: 100%; padding: 10px; margin-top: 5px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
+        .info { font-size: 12px; color: #666; margin-top: 5px; }
         button { width: 100%; background: #28a745; color: white; border: none; padding: 12px; margin-top: 20px; border-radius: 4px; font-size: 16px; cursor: pointer; }
         button:hover { background: #218838; }
         #status { margin-top: 15px; text-align: center; font-weight: bold; font-size: 14px; }
@@ -54,11 +73,12 @@ app.get('/', (req, res) => {
     </head>
     <body>
       <div class="card">
-        <h2>Airtime Reseller</h2>
+        <h2>Instant Airtime</h2>
         <label>Phone Number (e.g. 2547XXXXXXXX)</label>
         <input type="text" id="phone" value="2547" />
-        <label>Amount (KES)</label>
+        <label>Airtime Amount (KES)</label>
         <input type="number" id="amount" value="10" />
+        <div class="info">A small KES 2 convenience fee applies.</div>
         <button onclick="triggerStkPush()">Buy Airtime</button>
         <div id="status"></div>
       </div>
@@ -80,7 +100,7 @@ app.get('/', (req, res) => {
             const data = await res.json();
             if (data.success) {
               statusDiv.style.color = '#28a745';
-              statusDiv.innerText = 'STK Push sent successfully! Enter your PIN on your phone.';
+              statusDiv.innerText = 'STK Push sent! Enter your PIN on your phone.';
             } else {
               statusDiv.style.color = '#dc3545';
               statusDiv.innerText = 'Error: ' + JSON.stringify(data.error);
@@ -96,12 +116,17 @@ app.get('/', (req, res) => {
   `);
 });
 
-// 1. Endpoint to Initiate M-Pesa STK Push
+// 1. Endpoint to Initiate M-Pesa STK Push with Profit Markup & DB Logging
 app.post('/api/stk-push', async (req, res) => {
   try {
     const { phoneNumber, amount } = req.body;
-    const accessToken = await getMpesaAccessToken();
+    const airtimeVal = Number(amount) || 10;
+    
+    // DYNAMIC PRICING: Add KES 2 convenience fee markup for your profit
+    const convenienceFee = 2;
+    const mpesaAmountCharged = airtimeVal + convenienceFee;
 
+    const accessToken = await getMpesaAccessToken();
     const timestamp = new Date().toISOString().replace(/[^0-9]/g, '').slice(0, 14);
     const shortCode = process.env.MPESA_SHORTCODE || '174379';
     const passkey = process.env.MPESA_PASSKEY;
@@ -112,7 +137,7 @@ app.post('/api/stk-push', async (req, res) => {
       Password: password,
       Timestamp: timestamp,
       TransactionType: 'CustomerPayBillOnline',
-      Amount: amount || 1,
+      Amount: mpesaAmountCharged, // Charges customer airtime + your markup fee
       PartyA: phoneNumber,
       PartyB: shortCode,
       PhoneNumber: phoneNumber,
@@ -124,10 +149,17 @@ app.post('/api/stk-push', async (req, res) => {
     const response = await axios.post(
       'https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/processrequest',
       stkData,
-      {
-        headers: { Authorization: `Bearer ${accessToken}` }
-      }
+      { headers: { Authorization: `Bearer ${accessToken}` } }
     );
+
+    // Save initial Pending transaction to MongoDB
+    await Transaction.create({
+      phoneNumber,
+      airtimeAmount: airtimeVal,
+      mpesaAmountCharged,
+      markupProfit: convenienceFee,
+      status: 'Pending'
+    });
 
     res.status(200).json({ success: true, data: response.data });
   } catch (error) {
@@ -136,7 +168,7 @@ app.post('/api/stk-push', async (req, res) => {
   }
 });
 
-// 2. M-Pesa Callback Endpoint (Triggers Africa's Talking Airtime on Success)
+// 2. M-Pesa Callback Endpoint (Updates DB & Dispatches Exact Airtime Requested)
 app.post('/api/mpesa-callback', async (req, res) => {
   console.log('M-Pesa Callback received:', JSON.stringify(req.body, null, 2));
 
@@ -146,33 +178,56 @@ app.post('/api/mpesa-callback', async (req, res) => {
   }
 
   const resultCode = stkCallback.ResultCode;
+  const callbackItems = stkCallback.CallbackMetadata?.Item || [];
+  const phoneItem = callbackItems.find(item => item.Name === 'PhoneNumber');
+  const receiptItem = callbackItems.find(item => item.Name === 'MpesaReceiptNumber');
+  
+  const phoneNumber = phoneItem ? `${phoneItem.Value}` : '254725141357';
+  const mpesaReceiptNumber = receiptItem ? receiptItem.Value : null;
+
+  // Find the pending transaction in database
+  const tx = await Transaction.findOne({ phoneNumber, status: 'Pending' }).sort({ createdAt: -1 });
 
   if (resultCode === 0) {
     console.log('Payment successful! Dispatching airtime via Africa\'s Talking...');
     
-    const callbackItems = stkCallback.CallbackMetadata?.Item || [];
-    const phoneItem = callbackItems.find(item => item.Name === 'PhoneNumber');
-    const amountItem = callbackItems.find(item => item.Name === 'Amount');
-    
-    const phoneNumber = phoneItem ? `+${phoneItem.Value}` : '+254725141357';
-    const amount = amountItem ? amountItem.Value : 10;
+    const airtimeToDispatch = tx ? tx.airtimeAmount : 10;
+
+    if (tx) {
+      tx.status = 'Paid';
+      tx.mpesaReceiptNumber = mpesaReceiptNumber;
+      await tx.save();
+    }
 
     try {
       const airtimeResponse = await airtime.send({
         recipients: [
           {
-            phoneNumber: phoneNumber,
-            amount: `${amount}`,
+            phoneNumber: `+${phoneNumber}`,
+            amount: `${airtimeToDispatch}`,
             currencyCode: 'KES'
           }
         ]
       });
       console.log('Africa\'s Talking Airtime Response:', JSON.stringify(airtimeResponse));
+
+      if (tx) {
+        tx.status = 'Completed';
+        await tx.save();
+      }
     } catch (error) {
       console.error('Africa\'s Talking Airtime Error:', error);
+      if (tx) {
+        tx.status = 'Airtime_Failed';
+        await tx.save();
+      }
     }
   } else {
     console.log(`Payment failed or cancelled. ResultCode: ${resultCode}`);
+    if (tx) {
+      tx.status = 'Payment_Failed';
+      await tx.save();
+    }
   }
 
   res.status(200).json({ Result: 'Received' });

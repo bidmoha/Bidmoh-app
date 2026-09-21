@@ -7,8 +7,9 @@
     "start": "node src/index.js"
   },
   "dependencies": {
+    "africastalking": "^0.6.0",
     "axios": "^1.6.0",
     "express": "^4.19.2",
-    "africastalking": "^0.6.0"
+    "mongoose": "^8.0.0"
   }
 }
